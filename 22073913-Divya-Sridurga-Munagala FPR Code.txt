@@ -1,0 +1,876 @@
+import os
+import random
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from collections import Counter
+from zipfile import ZipFile
+from glob import glob
+from PIL import Image
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from sklearn.model_selection import train_test_split
+import cv2
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import confusion_matrix, classification_report
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+
+###### **1.Dataset Download and Extraction**
+
+def download_and_extract_dataset(zip_url, output_dir, zip_path):
+    if not os.path.exists(zip_path):
+        !curl -L -o "{zip_path}" {zip_url}
+    if not os.path.exists(output_dir):
+        with ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(output_dir)
+
+dataset_url = "https://www.kaggle.com/api/v1/datasets/download/masoudnickparvar/brain-tumor-mri-dataset"
+zip_path = "/content/brain-tumor-classification-mri.zip"
+extracted_path = "/content/braintumordata"
+
+download_and_extract_dataset(dataset_url, extracted_path, zip_path)
+
+###### **2.Data preparation**
+
+data_dir = '/content/braintumordata'
+train_dir = os.path.join(data_dir, 'Training')
+test_dir = os.path.join(data_dir, 'Testing')
+
+###### **3.Exploratory Data Analysis (EDA)**
+
+###### **3.1 Class Labels**
+
+classes = os.listdir(train_dir)
+print("Classes:", classes)
+
+###### **3.2 Sample Images Per Class**
+
+plt.figure(figsize=(8, 5))
+
+for i, cls in enumerate(classes):
+    image_path = glob(os.path.join(train_dir, cls, '*'))[0]
+    img = Image.open(image_path).convert('RGB')
+    img = img.resize((130, 130))
+    plt.subplot(2, 2, i + 1)
+    plt.imshow(img)
+    plt.title(cls, fontsize=12)
+    plt.axis('off')
+
+plt.suptitle("Sample Images from Each Tumor Class", fontsize=10, y=1)
+plt.tight_layout()
+plt.show()
+
+###### **3.3 Class Distribution (Train vs Test) (Before Balancing)**
+
+def count_images(directory):
+    counts = {}
+    for cls in os.listdir(directory):
+        counts[cls] = len(os.listdir(os.path.join(directory, cls)))
+    return counts
+
+train_counts = count_images(train_dir)
+test_counts = count_images(test_dir)
+
+print("Training Counts:", train_counts)
+print("Testing Counts:", test_counts)
+
+classes = list(train_counts.keys())
+train_values = list(train_counts.values())
+test_values = list(test_counts.values())
+
+fig, ax = plt.subplots(1, 2, figsize=(14, 6))
+
+ax[0].bar(classes, train_values, color='skyblue', edgecolor='black')
+ax[0].set_title('Training Data Class Distribution', fontsize=10)
+ax[0].set_xlabel('Class', fontsize=12)
+ax[0].set_ylabel('Number of Images', fontsize=12)
+ax[0].tick_params(axis='x', rotation=45)
+ax[0].grid(axis='y', linestyle='--', alpha=0.7)
+
+for i, value in enumerate(train_values):
+    ax[0].text(i, value + 5, str(value), ha='center', fontsize=10)
+
+ax[1].bar(classes, test_values, color='salmon', edgecolor='black')
+ax[1].set_title('Testing Data Class Distribution', fontsize=10)
+ax[1].set_xlabel('Class', fontsize=12)
+ax[1].set_ylabel('Number of Images', fontsize=10)
+ax[1].tick_params(axis='x', rotation=45)
+ax[1].grid(axis='y', linestyle='--', alpha=0.7)
+
+for i, value in enumerate(test_values):
+    ax[1].text(i, value + 5, str(value), ha='center', fontsize=10)
+
+plt.suptitle("Class-wise Image Counts in Training and Testing Sets", fontsize=10, y=1)
+plt.tight_layout()
+plt.show()
+
+
+###### **3.4 Image Sizes distribution**
+
+def analyze_image_properties(directory):
+    sizes = []
+    channels = []
+    for cls in os.listdir(directory):
+        class_path = os.path.join(directory, cls)
+        for img_file in os.listdir(class_path):
+            img_path = os.path.join(class_path, img_file)
+            try:
+                with Image.open(img_path) as img:
+                    sizes.append(img.size)
+                    channels.append(img.mode)
+            except:
+                print(f"Could not open image: {img_path}")
+    return sizes, channels
+
+train_sizes, train_channels = analyze_image_properties(train_dir)
+test_sizes, test_channels = analyze_image_properties(test_dir)
+
+print("Training Image Properties:")
+print("  Unique sizes:", Counter(train_sizes).most_common(5)) # Show top 5 most common sizes
+print("  Unique channels:", Counter(train_channels))
+
+print("\nTesting Image Properties:")
+print("  Unique sizes:", Counter(test_sizes).most_common(5)) # Show top 5 most common sizes
+print("  Unique channels:", Counter(test_channels))
+
+# Image size distribution
+widths, heights = zip(*train_sizes)
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 2, 1)
+sns.histplot(widths, bins=20, kde=True)
+plt.title("Width Distribution")
+
+plt.subplot(1, 2, 2)
+sns.histplot(heights, bins=20, kde=True)
+plt.title("Height Distribution")
+plt.show()
+
+###### **3.5 Data Augmentation Visualization (4 per class)**
+
+def visualize_multiple_augmented_images(train_dir, classes):
+    fig, axes = plt.subplots(len(classes), 5, figsize=(20, 4 * len(classes)))
+    for i, cls in enumerate(classes):
+        img_path = glob(os.path.join(train_dir, cls, '*'))[0]
+        img = Image.open(img_path).convert('RGB').resize((130, 130))
+        axes[i, 0].imshow(img)
+        axes[i, 0].set_title(f"{cls} (Original)")
+        axes[i, 0].axis('off')
+        img_array = np.expand_dims(np.array(img), axis=0)
+
+        aug_gen = ImageDataGenerator(
+            rescale=1./255,
+            rotation_range=20,
+            zoom_range=0.15,
+            width_shift_range=0.1,
+            height_shift_range=0.1,
+            shear_range=0.15,
+            horizontal_flip=True,
+            fill_mode="nearest"
+        )
+
+        gen = aug_gen.flow(img_array, batch_size=1)
+        for j in range(1, 5):
+            batch = next(gen)[0]
+            axes[i, j].imshow(batch)
+            axes[i, j].set_title(f"{cls} (Augment {j})")
+            axes[i, j].axis('off')
+
+    plt.tight_layout()
+    plt.suptitle("Original and Augmented Samples Per Class", fontsize=16, y=1.02)
+    plt.show()
+
+visualize_multiple_augmented_images(train_dir, classes)
+
+###### **4. Data Balancing - Random Sampling**
+
+import pandas as pd
+import numpy as np
+import random
+from glob import glob
+import os
+
+def create_balanced_dataframe(train_dir):
+    image_paths = []
+    labels = []
+
+    for cls in os.listdir(train_dir):
+        class_path = os.path.join(train_dir, cls)
+        imgs = glob(os.path.join(class_path, '*'))
+        image_paths.extend(imgs)
+        labels.extend([cls] * len(imgs))
+
+    df = pd.DataFrame({'image_path': image_paths, 'label': labels})
+    max_count = df['label'].value_counts().max()
+
+    balanced_dfs = []
+    for label in df['label'].unique():
+        class_df = df[df['label'] == label]
+        resampled_df = class_df.sample(max_count, replace=True, random_state=42)
+        balanced_dfs.append(resampled_df)
+
+    balanced_df = pd.concat(balanced_dfs).reset_index(drop=True)
+    return balanced_df
+
+balanced_df = create_balanced_dataframe(train_dir)
+print(balanced_df['label'].value_counts())
+
+
+###### **4.1 Class Distribution Before and After Balancing**
+
+import matplotlib.pyplot as plt
+
+# Before balancing
+original_counts = count_images(train_dir)  # This function is already defined
+original_labels = list(original_counts.keys())
+original_values = list(original_counts.values())
+
+# After balancing (from balanced_df)
+balanced_counts = balanced_df['label'].value_counts().sort_index()
+balanced_labels = balanced_counts.index.tolist()
+balanced_values = balanced_counts.values.tolist()
+
+# Plotting
+fig, ax = plt.subplots(1, 2, figsize=(14, 6))
+
+# Original
+ax[0].bar(original_labels, original_values, color='skyblue', edgecolor='black')
+ax[0].set_title('Training Data Before Balancing')
+ax[0].set_xlabel('Class')
+ax[0].set_ylabel('Image Count')
+ax[0].tick_params(axis='x', rotation=45)
+for i, v in enumerate(original_values):
+    ax[0].text(i, v + 5, str(v), ha='center', fontsize=10)
+
+# Balanced
+ax[1].bar(balanced_labels, balanced_values, color='lightgreen', edgecolor='black')
+ax[1].set_title('Training Data After Balancing')
+ax[1].set_xlabel('Class')
+ax[1].set_ylabel('Image Count')
+ax[1].tick_params(axis='x', rotation=45)
+for i, v in enumerate(balanced_values):
+    ax[1].text(i, v + 5, str(v), ha='center', fontsize=10)
+
+plt.suptitle("Comparison of Class Distribution Before and After Balancing", fontsize=14)
+plt.tight_layout()
+plt.show()
+
+
+###### **5. Train-Validation Split**
+
+from sklearn.model_selection import train_test_split
+
+train_df, val_df = train_test_split(
+    balanced_df,
+    test_size=0.2,
+    stratify=balanced_df['label'],
+    random_state=42
+)
+
+print("Train size:", len(train_df))
+print("Validation size:", len(val_df))
+
+
+##### **5.1 Class Distribution (Train, Validation, Test)**
+
+# Train / Validation counts
+train_counts = train_df['label'].value_counts().sort_index()
+val_counts = val_df['label'].value_counts().sort_index()
+
+# Test counts (from generator directly)
+test_counts = pd.Series(test_generator.classes).value_counts().sort_index()
+test_counts.index = [list(test_generator.class_indices.keys())[i] for i in test_counts.index]
+
+# Combine into one DataFrame
+distribution_df = pd.DataFrame({
+    'Class': train_counts.index,
+    'Train': train_counts.values,
+    'Validation': val_counts.values,
+    'Test': test_counts.values
+})
+
+# Melt into long format for Seaborn
+distribution_df = distribution_df.melt(id_vars='Class', var_name='Dataset', value_name='Count')
+
+# Plot
+plt.figure(figsize=(8, 5))
+ax = sns.barplot(data=distribution_df, x='Class', y='Count', hue='Dataset', palette='Set2')
+
+# Annotate counts on top of bars
+for p in ax.patches:
+    height = int(p.get_height())
+    ax.annotate(f'{height}',
+                (p.get_x() + p.get_width() / 2., height),
+                ha='center', va='bottom', fontsize=9, color='black')
+
+plt.title('Class-wise Image Count: Train vs Validation vs Test', fontsize=14)
+plt.xlabel('Class', fontsize=12)
+plt.ylabel('Number of Images', fontsize=12)
+plt.grid(axis='y', linestyle='--', alpha=0.6)
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+
+###### **6. Image Data Generators**
+
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+
+IMG_HEIGHT = 130
+IMG_WIDTH = 130
+BATCH_SIZE = 32
+
+train_datagen = ImageDataGenerator(
+    rescale=1./255,
+    rotation_range=20,
+    zoom_range=0.1,
+    width_shift_range=0.1,
+    height_shift_range=0.1,
+    shear_range=0.1,
+    horizontal_flip=True,
+    fill_mode="nearest"
+)
+
+test_datagen = ImageDataGenerator(rescale=1./255)
+
+train_generator = train_datagen.flow_from_dataframe(
+    dataframe=train_df,
+    x_col='image_path',
+    y_col='label',
+    target_size=(IMG_HEIGHT, IMG_WIDTH),
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
+    shuffle=True
+)
+
+validation_generator = train_datagen.flow_from_dataframe(
+    dataframe=val_df,
+    x_col='image_path',
+    y_col='label',
+    target_size=(IMG_HEIGHT, IMG_WIDTH),
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
+    shuffle=False
+)
+
+test_generator = test_datagen.flow_from_directory(
+    test_dir,
+    target_size=(IMG_HEIGHT, IMG_WIDTH),
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
+    shuffle=False
+)
+
+print("\nTrain Generator class indices:", train_generator.class_indices)
+print("Validation Generator class indices:", validation_generator.class_indices)
+print("Test Generator class indices:", test_generator.class_indices)
+
+
+###### **7. CNN Model Building**
+
+from tensorflow.keras import layers, models
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from sklearn.metrics import classification_report, confusion_matrix
+
+# Build the model
+model = models.Sequential([
+    layers.Conv2D(32, (3, 3), activation='relu', input_shape=(IMG_HEIGHT, IMG_WIDTH, 3)),
+    layers.MaxPooling2D((2, 2)),
+    layers.Conv2D(64, (3, 3), activation='relu'),
+    layers.MaxPooling2D((2, 2)),
+    layers.Conv2D(128, (3, 3), activation='relu'),
+    layers.MaxPooling2D((2, 2)),
+    layers.Flatten(),
+    layers.Dense(512, activation='relu'),
+    layers.Dropout(0.5),
+    layers.Dense(len(classes), activation='softmax') # Output layer with number of classes
+])
+
+
+# Compile the model
+model.compile(optimizer='adam',
+              loss='categorical_crossentropy', # Use categorical_crossentropy for multi-class
+              metrics=['accuracy'])
+
+model.summary()
+
+###### **7.1 Training**
+
+# Train the model
+EPOCHS = 100
+
+history = model.fit(
+    train_generator,
+    steps_per_epoch=train_generator.samples // BATCH_SIZE,
+    epochs=EPOCHS,
+    validation_data=validation_generator,
+    validation_steps=validation_generator.samples // BATCH_SIZE
+)
+
+
+###### **7.2 Training, validation Accuracy and Loss plots**
+
+# Plot training history
+acc = history.history['accuracy']
+val_acc = history.history['val_accuracy']
+loss = history.history['loss']
+val_loss = history.history['val_loss']
+
+epochs_range = range(EPOCHS)
+
+plt.figure(figsize=(12, 4))
+plt.subplot(1, 2, 1)
+plt.plot(epochs_range, acc, label='Training Accuracy')
+plt.plot(epochs_range, val_acc, label='Validation Accuracy')
+plt.legend(loc='lower right')
+plt.title('Training and Validation Accuracy')
+
+plt.subplot(1, 2, 2)
+plt.plot(epochs_range, loss, label='Training Loss')
+plt.plot(epochs_range, val_loss, label='Validation Loss')
+plt.legend(loc='upper right')
+plt.title('Training and Validation Loss')
+plt.show()
+
+###### **8.Model Evaluation**
+
+# Evaluate on test data
+print("\nEvaluating on test data...")
+loss, accuracy = model.evaluate(test_generator)
+
+print(f"Test Loss: {loss:.4f}")
+print(f"Test Accuracy: {accuracy:.4f}")
+
+test_generator.reset()
+predictions = model.predict(test_generator)
+predicted_classes = np.argmax(predictions, axis=1)
+true_classes = test_generator.classes
+class_labels = list(test_generator.class_indices.keys())
+
+###### **8.1 classification Report**
+
+# Classification Report
+print("\nClassification Report:")
+print(classification_report(true_classes, predicted_classes, target_names=class_labels))
+
+###### **8.2 confusion matrix**
+
+# Confusion Matrix
+cm = confusion_matrix(true_classes, predicted_classes)
+plt.figure(figsize=(8, 6))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_labels, yticklabels=class_labels)
+plt.title('Confusion Matrix')
+plt.xlabel('Predicted Label')
+plt.ylabel('True Label')
+plt.show()
+
+#### **9. Transfer Learning**
+
+!pip install optuna
+
+##### **9.1  Imports**
+
+import tensorflow as tf
+from tensorflow.keras import Model
+from tensorflow.keras.layers import Dense, Dropout, GlobalAveragePooling2D
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import classification_report, confusion_matrix,accuracy_score
+from tensorflow.keras import backend as K
+import optuna
+
+SEED = 42
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+
+##### **9.2 Data Preparation (for Transfer Models)**
+
+IMG_HEIGHT = 128
+IMG_WIDTH = 128
+BATCH_SIZE = 32
+
+train_datagen = ImageDataGenerator(
+    rescale=1./255,
+    rotation_range=20,
+    zoom_range=0.1,
+    width_shift_range=0.1,
+    height_shift_range=0.1,
+    shear_range=0.1,
+    horizontal_flip=True,
+    fill_mode="nearest"
+)
+
+test_datagen = ImageDataGenerator(rescale=1./255)
+
+train_generator = train_datagen.flow_from_dataframe(
+    dataframe=train_df,
+    x_col='image_path',
+    y_col='label',
+    target_size=(IMG_HEIGHT, IMG_WIDTH),
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
+    shuffle=True
+)
+
+validation_generator = train_datagen.flow_from_dataframe(
+    dataframe=val_df,
+    x_col='image_path',
+    y_col='label',
+    target_size=(IMG_HEIGHT, IMG_WIDTH),
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
+    shuffle=False
+)
+
+test_generator = test_datagen.flow_from_directory(
+    test_dir,
+    target_size=(IMG_HEIGHT, IMG_WIDTH),
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
+    shuffle=False
+)
+
+num_classes = len(train_generator.class_indices)
+
+print("\n Class Indices:")
+print("Train:", train_generator.class_indices)
+print("Val:", validation_generator.class_indices)
+print("Test:", test_generator.class_indices)
+
+
+
+##### **9.3 Transfer learning Model Builder & Compiler**
+
+def build_transfer_model(base_model, num_classes, dropout_rate):
+    x = base_model.output
+    x = GlobalAveragePooling2D()(x)
+    x = Dropout(dropout_rate)(x)
+    preds = Dense(num_classes, activation='softmax')(x)
+    return Model(inputs=base_model.input, outputs=preds)
+
+
+def compile_model(model, optimizer_choice="adam", lr=1e-4):
+    if optimizer_choice == "adam":
+        opt = Adam(learning_rate=lr)
+    elif optimizer_choice == "adamw":
+        opt = tf.keras.optimizers.AdamW(learning_rate=lr)
+    else:
+        opt = tf.keras.optimizers.RMSprop(learning_rate=lr)
+
+    model.compile(optimizer=opt,
+                  loss="categorical_crossentropy",
+                  metrics=["accuracy"])
+    return model
+
+##### **9.4 Callbacks**
+
+def get_callbacks():
+    return [
+        EarlyStopping(patience=5, restore_best_weights=True, monitor="val_loss"),
+        ReduceLROnPlateau(factor=0.2, patience=2, verbose=1, monitor="val_loss"),
+    ]
+
+##### **9.5 Training Utility**
+
+def train_model(model, train_gen, val_gen, epochs=50):
+    history = model.fit(
+        train_gen,
+        validation_data=val_gen,
+        epochs=epochs,
+        callbacks=get_callbacks(),
+        verbose=1
+    )
+    return history
+
+
+##### **9.6 Training Curve Plot Function**
+
+def plot_training_curves(history, model_name="Model"):
+    acc = history.history["accuracy"]
+    val_acc = history.history["val_accuracy"]
+    loss = history.history["loss"]
+    val_loss = history.history["val_loss"]
+    epochs_range = range(1, len(acc)+1)
+
+    plt.figure(figsize=(12,4))
+
+    # Accuracy
+    plt.subplot(1,2,1)
+    plt.plot(epochs_range, acc, label="Train Accuracy")
+    plt.plot(epochs_range, val_acc, label="Val Accuracy")
+    plt.xlabel("Epochs"); plt.ylabel("Accuracy")
+    plt.title(f"{model_name} Accuracy")
+    plt.legend(); plt.grid(alpha=0.3)
+
+    # Loss
+    plt.subplot(1,2,2)
+    plt.plot(epochs_range, loss, label="Train Loss")
+    plt.plot(epochs_range, val_loss, label="Val Loss")
+    plt.xlabel("Epochs"); plt.ylabel("Loss")
+    plt.title(f"{model_name} Loss")
+    plt.legend(); plt.grid(alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+
+##### **9.7 Evaluation Utility**
+
+def evaluate_model(model, test_gen, model_name="Model"):
+    test_loss, test_acc = model.evaluate(test_gen, verbose=1)
+    print(f"\n {model_name} Test Accuracy: {test_acc:.4f}")
+    print(f" {model_name} Test Loss: {test_loss:.4f}")
+
+    # Predictions
+    y_pred = np.argmax(model.predict(test_gen), axis=1)
+    y_true = test_gen.classes
+    labels = list(test_gen.class_indices.keys())
+
+    print("\nClassification Report:")
+    print(classification_report(y_true, y_pred, target_names=labels))
+
+    # Confusion Matrix
+    cm = confusion_matrix(y_true, y_pred)
+    plt.figure(figsize=(6,5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                xticklabels=labels, yticklabels=labels)
+    plt.title(f"{model_name} Confusion Matrix")
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.show()
+
+##### **10. Hyperparameter Tuning (Optuna)**
+
+##### **10.1 Objective Function**
+
+def objective(trial):
+    K.clear_session()
+
+    lr = trial.suggest_loguniform("lr", 1e-5, 1e-3)
+    dropout_rate = trial.suggest_uniform("dropout", 0.4, 0.6)
+    optimizer_choice = trial.suggest_categorical("optimizer", ["adam", "adamw"])
+
+    base_model = tf.keras.applications.EfficientNetB0(
+        weights="imagenet", include_top=False, input_shape=(IMG_HEIGHT, IMG_WIDTH, 3)
+    )
+
+    model = build_transfer_model(base_model, num_classes, dropout_rate)
+    model = compile_model(model, optimizer_choice, lr)
+
+    history = model.fit(
+        train_generator,
+        validation_data=validation_generator,
+        epochs=5,
+        verbose=1,
+        callbacks=[EarlyStopping(patience=2, restore_best_weights=True, monitor="val_loss")]
+    )
+
+    val_acc = max(history.history["val_accuracy"])
+    return val_acc
+
+##### **10.2 Run Optuna Study**
+
+study = optuna.create_study(direction="maximize")
+study.optimize(objective, n_trials=10)
+
+##### **10.3 Best Hyperparameters**
+
+print("Best Trial:")
+trial = study.best_trial
+print(f"  Validation Accuracy: {trial.value:.4f}")
+print("  Best Hyperparameters:", trial.params)
+
+best_params = study.best_trial.params
+final_lr = best_params["lr"]
+final_dropout = best_params["dropout"]
+final_optimizer = best_params["optimizer"]
+
+##### **11. Final Model Training (EfficientNetB0)**
+
+base_final = tf.keras.applications.EfficientNetB0(weights="imagenet", include_top=False,
+                                                  input_shape=(IMG_HEIGHT, IMG_WIDTH, 3))
+final_model = build_transfer_model(base_final, num_classes, final_dropout)
+final_model = compile_model(final_model, final_optimizer, final_lr)
+
+history_final = train_model(final_model, train_generator, validation_generator, epochs=50)
+
+
+###### **11.1 Training & Curves**
+
+
+plot_training_curves(history_final, "EfficientNetB0 (Tuned)")
+
+###### **11.2 Test Evaluation**
+
+evaluate_model(final_model, test_generator, "EfficientNetB0 (Tuned)")
+
+###### **12. ResNet50 Training & Evaluation**
+
+base_resnet = tf.keras.applications.ResNet50(
+    weights="imagenet", include_top=False, input_shape=(IMG_HEIGHT, IMG_WIDTH, 3)
+)
+
+resnet_model = build_transfer_model(base_resnet, num_classes, final_dropout)
+resnet_model = compile_model(resnet_model, final_optimizer, final_lr)
+
+history_resnet = train_model(resnet_model, train_generator, validation_generator,
+                             epochs=50)
+
+###### **12.1 Training & Curves**
+
+plot_training_curves(history_resnet, "ResNet50 (Tuned)")
+
+###### **12.2 Test Evaluation**
+
+evaluate_model(resnet_model, test_generator, "ResNet50 (Tuned)")
+
+###### **13. Xception Training & Evaluation**
+
+base_xception = tf.keras.applications.Xception(
+    weights="imagenet", include_top=False, input_shape=(IMG_HEIGHT, IMG_WIDTH, 3)
+)
+
+xception_model = build_transfer_model(base_xception, num_classes, final_dropout)
+xception_model = compile_model(xception_model, final_optimizer, final_lr)
+
+
+history_xception = train_model(xception_model, train_generator, validation_generator,
+                               epochs=50)
+
+
+###### **13.1 Training & Curves**
+
+plot_training_curves(history_xception, "Xception (Tuned)")
+
+###### **13.2 Test Evaluation**
+
+evaluate_model(xception_model, test_generator, "Xception (Tuned)")
+
+###### **14. Comparative Analysis of Models**
+
+def compare_histories(histories, model_names):
+    plt.figure(figsize=(14,6))
+
+    plt.subplot(1,2,1)
+    for history, name in zip(histories, model_names):
+        plt.plot(history.history["val_accuracy"], label=f"{name} Val Acc")
+    plt.xlabel("Epochs"); plt.ylabel("Validation Accuracy")
+    plt.title("Validation Accuracy Comparison")
+    plt.legend(); plt.grid(alpha=0.3)
+
+    plt.subplot(1,2,2)
+    for history, name in zip(histories, model_names):
+        plt.plot(history.history["val_loss"], label=f"{name} Val Loss")
+    plt.xlabel("Epochs"); plt.ylabel("Validation Loss")
+    plt.title("Validation Loss Comparison")
+    plt.legend(); plt.grid(alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+compare_histories(
+    [history_final, history_resnet, history_xception],
+    ["EfficientNetB0", "ResNet50", "Xception"]
+)
+
+###### **15. Ensemble Learning**
+
+###### **15.1 Dynamic Weighted Ensemble (Val Accuracy Based)**
+
+def get_val_accuracy(model, val_gen):
+    loss, acc = model.evaluate(val_gen, verbose=0)
+    return acc
+
+models = [xception_model, resnet_model]
+val_accuracies = [get_val_accuracy(m, validation_generator) for m in models]
+
+print(" Validation Accuracies:", val_accuracies)
+
+weights = np.array(val_accuracies) / np.sum(val_accuracies)
+print(" Dynamic Weights (based on validation accuracy):", weights)
+
+
+def weighted_ensemble_predictions(models, weights, test_gen):
+    preds = [m.predict(test_gen, verbose=0) for m in models]
+
+    weighted_preds = np.zeros_like(preds[0])
+    for p, w in zip(preds, weights):
+        weighted_preds += w * p
+
+    y_pred = np.argmax(weighted_preds, axis=1)
+    return y_pred, weighted_preds
+
+
+y_pred, weighted_preds = weighted_ensemble_predictions(models, weights, test_generator)
+
+y_true = test_generator.classes
+labels = list(test_generator.class_indices.keys())
+
+print("\n Classification Report (Dynamic Weighted Ensemble - Val Acc):")
+print(classification_report(y_true, y_pred, target_names=labels))
+
+cm = confusion_matrix(y_true, y_pred)
+plt.figure(figsize=(6,5))
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels)
+plt.title("Dynamic Weighted Ensemble Confusion Matrix (Val Acc Weights)")
+plt.xlabel("Predicted"); plt.ylabel("True")
+plt.show()
+
+###### **15.2 ROC Curves (Models vs Ensemble)**
+
+plt.figure(figsize=(8,6))
+
+# Individual models
+for model, name in zip([final_model, resnet_model, xception_model],
+                       ["EfficientNetB0", "ResNet50", "Xception"]):
+    preds = model.predict(test_generator, verbose=0)
+    for i, label in enumerate(labels):
+        fpr, tpr, _ = roc_curve(y_true_bin[:, i], preds[:, i])
+        auc_score = auc(fpr, tpr)
+        plt.plot(fpr, tpr, alpha=0.3, label=f"{name}-{label} (AUC={auc_score:.2f})")
+
+# Ensemble
+for i, label in enumerate(labels):
+    fpr, tpr, _ = roc_curve(y_true_bin[:, i], weighted_preds[:, i])
+    auc_score = auc(fpr, tpr)
+    plt.plot(fpr, tpr, linewidth=2, label=f"Ensemble-{label} (AUC={auc_score:.2f})")
+
+plt.plot([0,1],[0,1],'k--')
+plt.xlabel("False Positive Rate"); plt.ylabel("True Positive Rate")
+plt.title("ROC Curves - Models vs Ensemble")
+plt.legend(fontsize=8, loc="lower right")
+plt.grid(alpha=0.3)
+plt.show()
+
+
+###### **16.Test Accuracy Comparison (All Models vs Ensemble)**
+
+def get_test_accuracy(model, test_gen):
+    loss, acc = model.evaluate(test_gen, verbose=0)
+    return acc
+
+test_acc_cnn = get_test_accuracy(model, test_generator)
+test_acc_eff = get_test_accuracy(final_model, test_generator)
+test_acc_res = get_test_accuracy(resnet_model, test_generator)
+test_acc_xcp = get_test_accuracy(xception_model, test_generator)
+
+
+ensemble_test_acc = accuracy_score(y_true, y_pred)
+
+labels_models = ["CNN Model","EfficientNetB0", "ResNet50", "Xception", "Ensemble"]
+test_accuracies = [test_acc_cnn,test_acc_eff, test_acc_res, test_acc_xcp, ensemble_test_acc]
+
+plt.figure(figsize=(7,5))
+sns.barplot(x=labels_models, y=test_accuracies, palette="Set2")
+for i, v in enumerate(test_accuracies):
+    plt.text(i, v+0.01, f"{v:.2%}", ha='center', fontsize=10)
+plt.title("Test Accuracy Comparison: Models vs Ensemble")
+plt.ylabel("Test Accuracy")
+plt.ylim(0,1)
+plt.grid(axis="y", linestyle="--", alpha=0.5)
+plt.show()
